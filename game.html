@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Clean-Up Time! - お掃除タイム</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #120800;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: monospace;
+  }
+  #title {
+    color: #ffcc66;
+    font-size: 20px;
+    letter-spacing: 4px;
+    margin-bottom: 10px;
+    text-shadow: 0 0 12px #ff8800;
+  }
+  canvas {
+    border: 4px solid #7a4010;
+    box-shadow: 0 0 30px #7a401044;
+    image-rendering: pixelated;
+    display: block;
+  }
+  #controls {
+    color: #998866;
+    font-size: 11px;
+    margin-top: 8px;
+    letter-spacing: 1px;
+  }
+</style>
+</head>
+<body>
+<div id="title">お掃除タイム！  CLEAN-UP TIME!</div>
+<canvas id="game" width="800" height="600"></canvas>
+<div id="controls">ARROW KEYS / WASD to move &nbsp;&nbsp;|&nbsp;&nbsp; Collect 50 garbage then touch a corner BIN to empty</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+const W = 800, H = 600;
+const HUD_H = 42;
+const WALL = 14;
+const ROOM_TOP = HUD_H;
+const TILE = 18;
+const MAX_GARBAGE = 35;
+const FULL = 50;
+
+// Corner bins: { x, y, w, h }
+const BINS = [
+  { x: WALL,         y: ROOM_TOP + WALL,     w: 58, h: 58 },
+  { x: W-WALL-58,    y: ROOM_TOP + WALL,     w: 58, h: 58 },
+  { x: WALL,         y: H - WALL - 58,       w: 58, h: 58 },
+  { x: W - WALL-58,  y: H - WALL - 58,       w: 58, h: 58 },
+];
+
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault();
+});
+window.addEventListener('keyup', e => { keys[e.key] = false; });
+
+let frame = 0;
+let score = 0;
+let phase = 'playing'; // 'playing' | 'full'
+let garbageList = [];
+let sparks = [];   // { x, y, life, color }
+let binFlash = 0;  // countdown for bin empty animation
+
+const lady = {
+  x: 400, y: 320,
+  speed: 3,
+  dir: 'right',
+  moving: false,
+  count: 0,
+};
+
+const kid = {
+  x: 220, y: 220,
+  speed: 2.2,
+  dx: 1, dy: 0,
+  dirTimer: 80,
+  dropTimer: 140,
+  throwAnim: 0,
+};
+
+// ─── Pixel helpers ────────────────────────────────────────────────────────────
+function px(x, y, w, h, c) {
+  ctx.fillStyle = c;
+  ctx.fillRect(Math.round(x), Math.round(y), w, h);
+}
+
+// ─── Draw Floor ───────────────────────────────────────────────────────────────
+function drawRoom() {
+  // Tatami tiles
+  for (let ty = ROOM_TOP; ty < H; ty += TILE) {
+    for (let tx = 0; tx < W; tx += TILE) {
+      const alt = (Math.floor(tx / TILE) + Math.floor((ty - ROOM_TOP) / TILE)) % 2;
+      ctx.fillStyle = alt ? '#c9b87a' : '#d8c888';
+      ctx.fillRect(tx, ty, TILE, TILE);
+      ctx.strokeStyle = '#b8a460';
+      ctx.lineWidth = 0.5;
+      ctx.strokeRect(tx + 0.5, ty + 0.5, TILE - 1, TILE - 1);
+    }
+  }
+
+  // Wall panels
+  ctx.fillStyle = '#7a4820';
+  ctx.fillRect(0, ROOM_TOP, W, WALL);            // top
+  ctx.fillRect(0, H - WALL, W, WALL);            // bottom
+  ctx.fillRect(0, ROOM_TOP, WALL, H - ROOM_TOP); // left
+  ctx.fillRect(W - WALL, ROOM_TOP, WALL, H - ROOM_TOP); // right
+
+  // Wood grain lines on walls
+  ctx.strokeStyle = '#5a3010';
+  ctx.lineWidth = 1;
+  for (let wx = 30; wx < W; wx += 30) {
+    ctx.beginPath(); ctx.moveTo(wx, ROOM_TOP); ctx.lineTo(wx, ROOM_TOP + WALL); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(wx, H - WALL); ctx.lineTo(wx, H); ctx.stroke();
+  }
+  for (let wy = ROOM_TOP + 30; wy < H; wy += 30) {
+    ctx.beginPath(); ctx.moveTo(0, wy); ctx.lineTo(WALL, wy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(W - WALL, wy); ctx.lineTo(W, wy); ctx.stroke();
+  }
+
+  // Inner wall border
+  ctx.strokeStyle = '#5a3010';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(WALL, ROOM_TOP + WALL, W - WALL * 2, H - ROOM_TOP - WALL * 2);
+
+  // Sliding door decoration - top wall
+  const doorW = 100, doorH = 10;
+  const doorY = ROOM_TOP + 2;
+  ctx.fillStyle = '#f0e0b0';
+  ctx.fillRect(W/2 - doorW, doorY, doorW, doorH);
+  ctx.fillRect(W/2 + 2, doorY, doorW, doorH);
+  ctx.strokeStyle = '#8B5E3C';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(W/2 - doorW, doorY, doorW, doorH);
+  ctx.strokeRect(W/2 + 2, doorY, doorW, doorH);
+  // Door panels
+  for (let dp = 0; dp < 4; dp++) {
+    ctx.strokeRect(W/2 - doorW + dp * 25, doorY, 25, doorH);
+    ctx.strokeRect(W/2 + 2 + dp * 25, doorY, 25, doorH);
+  }
+}
+
+// ─── Draw Corner Bins ─────────────────────────────────────────────────────────
+function drawBins() {
+  BINS.forEach((bin, i) => {
+    // Base
+    px(bin.x, bin.y, bin.w, bin.h, '#3a1e00');
+    // Lid
+    px(bin.x + 4, bin.y, bin.w - 8, 10, '#5a3210');
+    // Body shading
+    px(bin.x + bin.w - 8, bin.y + 10, 8, bin.h - 10, '#2a1400');
+    // Stripes on body
+    ctx.fillStyle = '#4a2800';
+    for (let s = 14; s < bin.h - 4; s += 8) {
+      ctx.fillRect(bin.x + 4, bin.y + s, bin.w - 8, 3);
+    }
+    // Label
+    ctx.fillStyle = '#ffcc66';
+    ctx.font = 'bold 9px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('BIN', bin.x + bin.w / 2, bin.y + bin.h / 2 + 4);
+    ctx.font = '8px monospace';
+    ctx.fillText('EMPTY', bin.x + bin.w / 2, bin.y + bin.h / 2 + 14);
+
+    // Glow border when phase is full
+    if (phase === 'full' && frame % 40 < 22) {
+      ctx.strokeStyle = `rgba(255,80,80,${0.5 + Math.sin(frame * 0.2) * 0.5})`;
+      ctx.lineWidth = 3;
+      ctx.strokeRect(bin.x - 3, bin.y - 3, bin.w + 6, bin.h + 6);
+    }
+
+    // Empty flash
+    if (binFlash > 0) {
+      const alpha = binFlash / 20;
+      ctx.fillStyle = `rgba(255,255,200,${alpha})`;
+      ctx.fillRect(bin.x, bin.y, bin.w, bin.h);
+    }
+  });
+}
+
+// ─── Draw Garbage ─────────────────────────────────────────────────────────────
+function drawGarbage() {
+  garbageList.forEach(g => {
+    const gx = Math.round(g.x), gy = Math.round(g.y);
+    switch (g.type) {
+      case 0: // crumpled paper
+        px(gx - 5, gy - 4, 10, 8, '#ddd8c0');
+        px(gx - 3, gy - 2, 6, 4, '#c8c4a8');
+        px(gx - 1, gy - 4, 2, 2, '#bbb890');
+        break;
+      case 1: // candy wrapper
+        px(gx - 5, gy - 3, 10, 6, '#ffdd00');
+        px(gx - 5, gy - 3, 4, 6, '#ff7700');
+        px(gx + 1, gy - 3, 4, 6, '#ff3300');
+        px(gx + 4, gy - 1, 2, 2, '#ffee44');
+        break;
+      case 2: // banana peel
+        px(gx - 2, gy - 6, 4, 12, '#e8e000');
+        px(gx - 5, gy - 2, 4, 5, '#c8c000');
+        px(gx + 1, gy - 2, 4, 5, '#c0b800');
+        px(gx - 1, gy + 4, 2, 3, '#a09000');
+        break;
+      case 3: // soda can
+        px(gx - 4, gy - 6, 8, 12, '#c0c0c0');
+        px(gx - 4, gy - 6, 8, 3, '#909090');
+        px(gx - 4, gy + 3, 8, 3, '#909090');
+        px(gx - 2, gy - 3, 4, 6, '#ee2222');
+        px(gx - 1, gy - 1, 2, 2, '#ffffff');
+        break;
+      case 4: // chip bag
+        px(gx - 4, gy - 5, 8, 10, '#ff8800');
+        px(gx - 2, gy - 5, 4, 3, '#ffaa00');
+        px(gx - 2, gy + 2, 4, 3, '#cc6600');
+        break;
+    }
+  });
+}
+
+// ─── Draw Sparks/Flashes ──────────────────────────────────────────────────────
+function drawSparks() {
+  sparks = sparks.filter(s => s.life > 0);
+  sparks.forEach(s => {
+    ctx.globalAlpha = s.life / 16;
+    const r = (16 - s.life) * 1.2;
+    ctx.fillStyle = s.color;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+    ctx.fill();
+    s.life--;
+  });
+  ctx.globalAlpha = 1;
+}
+
+// ─── Draw Lady ────────────────────────────────────────────────────────────────
+function drawLady() {
+  const { x, y, dir, moving, count } = lady;
+  const ox = Math.round(x) - 16;
+  const oy = Math.round(y) - 18;
+  const bob = moving ? 0 : Math.sin(frame / 18) * 1.2;
+  const clothLen = moving ? Math.round(6 + Math.abs(Math.sin(frame * 0.35)) * 10) : 5;
+
+  // Flash when full
+  if (phase === 'full' && frame % 18 < 9) ctx.globalAlpha = 0.5;
+
+  // ── Hair bun ──
+  px(ox + 11, oy + bob,     10, 4, '#1a0800');
+  px(ox + 13, oy - 3 + bob,  6, 5, '#1a0800');
+
+  // ── Head ──
+  px(ox + 9,  oy + 4 + bob, 14, 12, '#f0b880');
+  // face details
+  px(ox + 11, oy + 7 + bob,  3,  3, '#1a0800'); // L eye
+  px(ox + 18, oy + 7 + bob,  3,  3, '#1a0800'); // R eye
+  px(ox + 12, oy + 12 + bob, 2,  2, '#e07060'); // blush L
+  px(ox + 18, oy + 12 + bob, 2,  2, '#e07060'); // blush R
+  px(ox + 13, oy + 13 + bob, 6,  2, '#cc6050'); // mouth
+
+  // ── Collar ──
+  px(ox + 12, oy + 15,  8, 5, '#ffffff');
+  px(ox + 14, oy + 15,  4, 5, '#ff6680');
+
+  // ── Kimono body (kneeling) ──
+  px(ox + 6,  oy + 18, 20, 14, '#cc2255');
+  px(ox + 4,  oy + 20,  5, 12, '#aa1840'); // L fold
+  px(ox + 23, oy + 20,  5, 12, '#aa1840'); // R fold
+  px(ox + 10, oy + 19, 12, 13, '#dd3366'); // center highlight
+
+  // ── Obi belt ──
+  px(ox + 6, oy + 18, 20, 4, '#e8a020');
+  px(ox + 8, oy + 19, 16, 2, '#ffcc44');  // belt shine
+
+  // ── Kneeling legs ──
+  px(ox + 4,  oy + 30, 12, 6, '#cc2255');
+  px(ox + 16, oy + 30, 12, 6, '#cc2255');
+  // Tabi socks
+  px(ox + 6,  oy + 34,  9, 4, '#f0f0f0');
+  px(ox + 17, oy + 34,  9, 4, '#f0f0f0');
+
+  // ── Hands ──
+  px(ox + 8,  oy + 26, 5, 4, '#f0b880');
+  px(ox + 19, oy + 26, 5, 4, '#f0b880');
+
+  // ── Fiber cloth extends in direction ──
+  const cl = clothLen;
+  if (dir === 'right') {
+    px(ox + 24, oy + 24, cl, 5, '#e8f4ff');
+    px(ox + 24, oy + 26, cl, 2, '#b8d8f0');
+  } else if (dir === 'left') {
+    px(ox + 8 - cl, oy + 24, cl, 5, '#e8f4ff');
+    px(ox + 8 - cl, oy + 26, cl, 2, '#b8d8f0');
+  } else if (dir === 'down') {
+    px(ox + 11, oy + 30, 10, cl, '#e8f4ff');
+    px(ox + 13, oy + 30,  6, cl, '#b8d8f0');
+  } else { // up
+    px(ox + 11, oy + 20 - cl, 10, cl, '#e8f4ff');
+    px(ox + 13, oy + 20 - cl,  6, cl, '#b8d8f0');
+  }
+
+  ctx.globalAlpha = 1;
+}
+
+// ─── Draw Kid ─────────────────────────────────────────────────────────────────
+function drawKid() {
+  const { x, y, throwAnim, dx } = kid;
+  const ox = Math.round(x) - 12;
+  const oy = Math.round(y) - 14;
+  const legSwing = frame % 14 < 7 ? 3 : -3;
+  const throwing = throwAnim > 0;
+  const flip = dx < 0; // mirror when going left
+
+  // ── Hair ──
+  px(ox + 3, oy,      18, 6, '#221100');
+  px(ox + 5, oy - 3,  14, 5, '#221100');
+
+  // ── Head ──
+  px(ox + 3, oy + 4, 18, 13, '#f0b880');
+  // face
+  px(ox + 6,  oy + 7,  3, 3, '#1a0800'); // L eye
+  px(ox + 15, oy + 7,  3, 3, '#1a0800'); // R eye
+  // cheeky grin
+  if (throwing) {
+    px(ox + 8, oy + 12, 8, 3, '#cc5544'); // open-mouth laugh
+    px(ox + 9, oy + 13, 6, 2, '#ffffff');
+  } else {
+    px(ox + 8, oy + 12, 8, 2, '#cc5544');
+  }
+
+  // ── Uniform (navy) ──
+  px(ox + 4, oy + 17, 16, 12, '#224488');
+  // collar
+  px(ox + 9, oy + 17, 6, 4, '#ffffff');
+
+  // ── Arms ──
+  if (throwing) {
+    // throwing arm raised
+    if (!flip) {
+      px(ox + 20, oy + 10, 5, 10, '#224488'); // R arm up
+      px(ox - 1,  oy + 19, 5, 8,  '#224488'); // L arm
+    } else {
+      px(ox - 1,  oy + 10, 5, 10, '#224488'); // L arm up
+      px(ox + 20, oy + 19, 5, 8,  '#224488'); // R arm
+    }
+  } else {
+    px(ox + 20, oy + 19, 5, 8, '#224488'); // R arm
+    px(ox - 1,  oy + 19, 5, 8, '#224488'); // L arm
+  }
+
+  // ── Hands ──
+  px(ox - 1, oy + 25, 5, 4, '#f0b880');
+  px(throwing && !flip ? ox + 20 : ox + 20, throwing && !flip ? oy + 18 : oy + 25, 5, 4, '#f0b880');
+
+  // ── Legs ──
+  px(ox + 4,  oy + 28, 6, 10 + legSwing, '#224488');
+  px(ox + 14, oy + 28, 6, 10 - legSwing, '#224488');
+  // Shoes
+  px(ox + 3,  oy + 36 + legSwing,  8, 5, '#111111');
+  px(ox + 13, oy + 36 - legSwing,  8, 5, '#111111');
+}
+
+// ─── Draw HUD ─────────────────────────────────────────────────────────────────
+function drawHUD() {
+  // Background
+  px(0, 0, W, HUD_H, '#1e0c00');
+  ctx.strokeStyle = '#7a4010';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(0, 0, W, HUD_H);
+
+  // Left: garbage count
+  ctx.fillStyle = '#ffcc66';
+  ctx.font = 'bold 13px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(`GARBAGE: ${lady.count}/${FULL}`, 12, 16);
+
+  // Progress bar
+  const barX = 12, barY = 22, barW = 160, barH = 12;
+  px(barX, barY, barW, barH, '#111');
+  const filled = Math.round((lady.count / FULL) * barW);
+  const barCol = lady.count < 20 ? '#44dd44' : lady.count < 40 ? '#ffaa22' : '#ff3333';
+  px(barX, barY, filled, barH, barCol);
+  ctx.strokeStyle = '#888866';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(barX, barY, barW, barH);
+
+  // Center: score
+  ctx.fillStyle = '#ffcc66';
+  ctx.font = 'bold 15px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(`SCORE: ${score}`, W / 2, 26);
+
+  // Right: full warning
+  if (phase === 'full' && frame % 36 < 18) {
+    ctx.fillStyle = '#ff2222';
+    ctx.font = 'bold 12px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText('[!!] GO EMPTY AT CORNER!', W - 10, 26);
+  }
+}
+
+// ─── Update Lady ──────────────────────────────────────────────────────────────
+function updateLady() {
+  let dx = 0, dy = 0;
+  if (keys['ArrowLeft']  || keys['a'] || keys['A']) dx = -1;
+  if (keys['ArrowRight'] || keys['d'] || keys['D']) dx =  1;
+  if (keys['ArrowUp']    || keys['w'] || keys['W']) dy = -1;
+  if (keys['ArrowDown']  || keys['s'] || keys['S']) dy =  1;
+
+  lady.moving = dx !== 0 || dy !== 0;
+
+  if (dx !== 0 || dy !== 0) {
+    if (Math.abs(dx) >= Math.abs(dy)) {
+      lady.dir = dx > 0 ? 'right' : 'left';
+    } else {
+      lady.dir = dy > 0 ? 'down' : 'up';
+    }
+  }
+
+  // Normalize diagonal
+  if (dx !== 0 && dy !== 0) {
+    dx *= 0.707;
+    dy *= 0.707;
+  }
+
+  lady.x = Math.max(WALL + 18, Math.min(W - WALL - 18, lady.x + dx * lady.speed));
+  lady.y = Math.max(ROOM_TOP + WALL + 20, Math.min(H - WALL - 20, lady.y + dy * lady.speed));
+}
+
+// ─── Update Kid ───────────────────────────────────────────────────────────────
+function updateKid() {
+  kid.dirTimer--;
+  if (kid.dirTimer <= 0) {
+    kid.dirTimer = 55 + Math.random() * 110 | 0;
+    const dirs = [
+      [1, 0], [-1, 0], [0, 1], [0, -1],
+      [0.7, 0.7], [0.7, -0.7], [-0.7, 0.7], [-0.7, -0.7]
+    ];
+    const d = dirs[Math.random() * dirs.length | 0];
+    kid.dx = d[0];
+    kid.dy = d[1];
+  }
+
+  kid.x += kid.dx * kid.speed;
+  kid.y += kid.dy * kid.speed;
+
+  // Bounce walls
+  if (kid.x < WALL + 20) { kid.x = WALL + 20; kid.dx = Math.abs(kid.dx); }
+  if (kid.x > W - WALL - 20) { kid.x = W - WALL - 20; kid.dx = -Math.abs(kid.dx); }
+  if (kid.y < ROOM_TOP + WALL + 20) { kid.y = ROOM_TOP + WALL + 20; kid.dy = Math.abs(kid.dy); }
+  if (kid.y > H - WALL - 20) { kid.y = H - WALL - 20; kid.dy = -Math.abs(kid.dy); }
+
+  if (kid.throwAnim > 0) kid.throwAnim--;
+
+  kid.dropTimer--;
+  if (kid.dropTimer <= 0) {
+    kid.dropTimer = 110 + Math.random() * 130 | 0;
+    kid.throwAnim = 10;
+    // Throw garbage with offset in random direction
+    const angle = Math.random() * Math.PI * 2;
+    const dist = 20 + Math.random() * 40;
+    const gx = Math.max(WALL + 10, Math.min(W - WALL - 10, kid.x + Math.cos(angle) * dist));
+    const gy = Math.max(ROOM_TOP + WALL + 10, Math.min(H - WALL - 10, kid.y + Math.sin(angle) * dist));
+
+    if (garbageList.length >= MAX_GARBAGE) garbageList.shift();
+    garbageList.push({ x: gx, y: gy, type: Math.random() * 5 | 0 });
+  }
+}
+
+// ─── Collision Detection ──────────────────────────────────────────────────────
+function checkCollisions() {
+  // Collect garbage
+  const HR = 14; // hitbox radius
+  garbageList = garbageList.filter(g => {
+    if (Math.abs(g.x - lady.x) < HR + 5 && Math.abs(g.y - lady.y) < HR + 5) {
+      lady.count++;
+      score += 10;
+      sparks.push({ x: g.x, y: g.y, life: 14, color: '#ffffaa' });
+      if (lady.count >= FULL) phase = 'full';
+      return false;
+    }
+    return true;
+  });
+
+  // Empty at corner bin
+  if (phase === 'full') {
+    BINS.forEach(bin => {
+      if (lady.x > bin.x && lady.x < bin.x + bin.w &&
+          lady.y > bin.y && lady.y < bin.y + bin.h) {
+        score += 50;
+        lady.count = 0;
+        phase = 'playing';
+        binFlash = 20;
+        sparks.push({ x: bin.x + bin.w / 2, y: bin.y + bin.h / 2, life: 20, color: '#ffffff' });
+      }
+    });
+  }
+
+  if (binFlash > 0) binFlash--;
+}
+
+// ─── Game Loop ────────────────────────────────────────────────────────────────
+function loop() {
+  frame++;
+
+  updateLady();
+  updateKid();
+  checkCollisions();
+
+  // Clear
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  drawRoom();
+  drawBins();
+  drawGarbage();
+  drawSparks();
+  drawLady();
+  drawKid();
+  drawHUD();
+
+  requestAnimationFrame(loop);
+}
+
+// Seed starting garbage so room isn't empty
+for (let i = 0; i < 6; i++) {
+  garbageList.push({
+    x: WALL + 30 + Math.random() * (W - WALL * 2 - 60),
+    y: ROOM_TOP + WALL + 30 + Math.random() * (H - ROOM_TOP - WALL * 2 - 60),
+    type: Math.random() * 5 | 0,
+  });
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
